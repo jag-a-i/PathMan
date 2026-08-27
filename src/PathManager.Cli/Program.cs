@@ -36,10 +36,10 @@ public static class Program
         var pathStore = new PathStore(env);
         var catalog = new CatalogManager(env);
         var shim = new ShimManager(env);
-        var doctor = new DoctorService(env, pathStore, catalog, shim);
+        var snapshot = new SnapshotManager(env, pathStore, catalog, shim);
+        var doctor = new DoctorService(env, pathStore, catalog, shim, snapshot);
         var why = new WhyService(env, pathStore, catalog, shim);
         var complete = new CompletionManager(env);
-        var snapshot = new SnapshotManager(env, pathStore, catalog, shim);
         var resolver = new HostResolver(env);
 
         bool isJson = args.Contains("--json");
@@ -411,7 +411,8 @@ public static class Program
         bool isJson,
         TextWriter stdout)
     {
-        bool repair = args.Contains("--repair");
+        bool repair = args.Any(a => string.Equals(a, "--repair", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(a, "repair", StringComparison.OrdinalIgnoreCase));
 
         var report = repair
             ? await doctor.RepairAsync()
@@ -421,6 +422,28 @@ public static class Program
         {
             stdout.WriteLine(JsonSerializer.Serialize(report, JsonOpts));
             return report.Status == HealthStatus.IssuesFound ? 1 : 0;
+        }
+
+        if (repair)
+        {
+            if (report.RepairsApplied.Count > 0)
+            {
+                stdout.WriteLine("REPAIRS APPLIED:");
+                stdout.WriteLine(new string('-', 50));
+                foreach (var rep in report.RepairsApplied)
+                {
+                    stdout.WriteLine($"  ✓ {rep}");
+                }
+                stdout.WriteLine("  ✓ Safety snapshot saved. (Run 'pathman undo' anytime to revert)");
+                stdout.WriteLine();
+            }
+            else
+            {
+                stdout.WriteLine("REPAIR STATUS:");
+                stdout.WriteLine(new string('-', 50));
+                stdout.WriteLine("  ✓ No repairs needed. Environment is already clean.");
+                stdout.WriteLine();
+            }
         }
 
         stdout.WriteLine("PathManager Doctor Diagnostic Report");

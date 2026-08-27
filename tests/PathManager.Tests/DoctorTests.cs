@@ -67,4 +67,25 @@ public class DoctorTests : IDisposable
         var after = await _doctor.RepairAsync();
         Assert.True(after.IsShimDirOnUserPath);
     }
+
+    [Fact]
+    public async Task Doctor_Repair_RemovesDeadDirsAndMachineDuplicates()
+    {
+        var existingDir = Path.Combine(_mockEnv.MockPmHome, "existing_bin");
+        Directory.CreateDirectory(existingDir);
+        _mockEnv.ExistingDirectories.Add(existingDir);
+
+        _mockEnv.MachinePath = @"C:\Windows\System32;C:\Tools";
+        _mockEnv.UserPath = $@"C:\Tools;C:\NonExistent_DeadDir123;{existingDir};{existingDir}";
+
+        var after = await _doctor.RepairAsync();
+
+        Assert.True(after.IsShimDirOnUserPath);
+        Assert.NotEmpty(after.RepairsApplied);
+        var userPath = _pathStore.GetUserPath();
+        Assert.False(userPath.Contains(@"C:\NonExistent_DeadDir123"));
+        Assert.False(userPath.Contains(@"C:\Tools")); // Removed because it exists in MachinePath
+        Assert.True(userPath.Contains(existingDir));
+        Assert.Equal(2, userPath.Count); // Shim dir + existingDir
+    }
 }

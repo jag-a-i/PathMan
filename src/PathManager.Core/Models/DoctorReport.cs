@@ -50,6 +50,8 @@ public class DoctorReport
     public bool IsProfileHookInstalled { get; set; }
     public string? ProfilePath { get; set; }
 
+    public List<string> RepairsApplied { get; set; } = new();
+
     public HealthStatus Status
     {
         get
