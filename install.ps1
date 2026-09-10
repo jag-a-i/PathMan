@@ -22,17 +22,69 @@ New-Item -ItemType Directory -Force -Path $snapshotsDir | Out-Null
 
 Write-Host "Installing PathManager to $pmHome..." -ForegroundColor Cyan
 
-# 3. Build & Publish Binaries if running locally, or copy existing binaries
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (Test-Path (Join-Path $scriptDir "src\PathManager.Cli\PathManager.Cli.csproj")) {
-    Write-Host "Publishing binaries..." -ForegroundColor DarkGray
+# 3. Obtain binaries: local publish, zip next to this script, or GitHub Release
+$scriptPath = $PSCommandPath
+if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Path }
+$scriptDir = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
+$repo = if ($env:PATHMAN_REPO) { $env:PATHMAN_REPO } else { 'jag-a-i/PathMan' }
+
+function Copy-PathManExes([string]$fromDir, [string]$toDir) {
+    $copied = $false
+    foreach ($name in @('pathman.exe', 'shim.exe')) {
+        $hit = Get-ChildItem -Path $fromDir -Filter $name -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($hit) {
+            Copy-Item $hit.FullName (Join-Path $toDir $name) -Force
+            $copied = $true
+        }
+    }
+    return $copied
+}
+
+if ($scriptDir -and (Test-Path (Join-Path $scriptDir "src\PathManager.Cli\PathManager.Cli.csproj"))) {
+    Write-Host "Publishing binaries from source..." -ForegroundColor DarkGray
     & dotnet publish (Join-Path $scriptDir "src\PathManager.Cli\PathManager.Cli.csproj") -c Release -o $shimsDir --nologo -v q
     & dotnet publish (Join-Path $scriptDir "src\PathManager.Shim\PathManager.Shim.csproj") -c Release -o $shimsDir --nologo -v q
+} elseif ($scriptDir -and (Test-Path (Join-Path $scriptDir "pathman.exe"))) {
+    Write-Host "Copying binaries next to install.ps1..." -ForegroundColor DarkGray
+    [void](Copy-PathManExes $scriptDir $shimsDir)
+} else {
+    Write-Host "Downloading PathManager from GitHub Releases ($repo)..." -ForegroundColor DarkGray
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch { }
+
+    $headers = @{ 'User-Agent' = 'pathman-install' }
+    $asset = $null
+    foreach ($api in @(
+        "https://api.github.com/repos/$repo/releases/latest",
+        "https://api.github.com/repos/$repo/releases/tags/nightly"
+    )) {
+        try {
+            $release = Invoke-RestMethod -Uri $api -Headers $headers
+            $asset = @($release.assets) | Where-Object { $_.name -like 'pathman-win-x64*.zip' } | Select-Object -First 1
+            if ($asset) { break }
+        } catch { }
+    }
+
+    if (-not $asset) {
+        Write-Error "No pathman-win-x64.zip on GitHub Releases for $repo. Clone the repo and run install.ps1, or wait for CI/CD to publish a release."
+        exit 1
+    }
+
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("pathman-rel-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $zip = Join-Path $tmp 'pathman-win-x64.zip'
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+    Expand-Archive -Path $zip -DestinationPath $tmp -Force
+    if (-not (Copy-PathManExes $tmp $shimsDir)) {
+        Write-Error "The release zip did not contain pathman.exe."
+        exit 1
+    }
 }
 
 $pathmanExe = Join-Path $shimsDir "pathman.exe"
 if (-not (Test-Path $pathmanExe)) {
-    Write-Error "pathman.exe not found at $pathmanExe. Please ensure dotnet SDK is installed or run from the repo root."
+    Write-Error "pathman.exe not found at $pathmanExe. Hint: run from the repo, or install from a GitHub Release."
     exit 1
 }
 
@@ -93,8 +145,14 @@ if (Get-Command Register-ArgumentCompleter -ErrorAction SilentlyContinue) {
                 }
             }
             'completions' {
-                $compSub = @('install')
-                return $compSub | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                if ($elements.Count -le 3) {
+                    $compSub = @('install', 'register-file', 'register-command', 'from-help')
+                    return $compSub | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                    }
+                }
+                $compFlags = @('--name', '--force', '--json', '--windows-powershell')
+                return $compFlags | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
                     [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
                 }
             }

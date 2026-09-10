@@ -161,3 +161,63 @@ public class InsecureTargetException : PathManagerException
         TargetPath = targetPath;
     }
 }
+
+public class CompleterFileNotFoundException : PathManagerException
+{
+    public string TargetPath { get; }
+    public CompleterFileNotFoundException(string targetPath)
+        : base($"Completion script not found: '{targetPath}'. Hint: run 'pathman doctor'.")
+    {
+        TargetPath = targetPath;
+    }
+}
+
+public class CompleterUnsupportedFileException : PathManagerException
+{
+    public string TargetPath { get; }
+    public CompleterUnsupportedFileException(string targetPath)
+        : base($"Completion scripts must be .ps1 files: '{targetPath}'. Hint: run 'pathman doctor'.")
+    {
+        TargetPath = targetPath;
+    }
+}
+
+public class CompleterExistsException : PathManagerException
+{
+    public string CommandName { get; }
+    public CompleterExistsException(string commandName, string existingPath)
+        : base($"A completion script for '{commandName}' already exists at '{existingPath}'. Use --force to overwrite. Hint: run 'pathman doctor'.")
+    {
+        CommandName = commandName;
+    }
+}
+
+public class CompleterEmptyException : PathManagerException
+{
+    public CompleterEmptyException(string detail)
+        : base($"{detail} Hint: run 'pathman doctor'.") { }
+}
+
+public class CompleterCommandFailedException : PathManagerException
+{
+    public string CommandLine { get; }
+    public int ExitCode { get; }
+    public CompleterCommandFailedException(string commandLine, int exitCode, string? stderr = null)
+        : base(BuildMessage(commandLine, exitCode, stderr))
+    {
+        CommandLine = commandLine;
+        ExitCode = exitCode;
+    }
+
+    private static string BuildMessage(string commandLine, int exitCode, string? stderr)
+    {
+        var detail = string.IsNullOrWhiteSpace(stderr) ? "" : $"\n{TrimStderr(stderr)}";
+        return $"Completion generator failed (exit {exitCode}): {commandLine}{detail}\nHint: run 'pathman doctor'.";
+    }
+
+    private static string TrimStderr(string stderr)
+    {
+        stderr = stderr.Trim();
+        return stderr.Length <= 2000 ? stderr : stderr[..2000] + "…";
+    }
+}

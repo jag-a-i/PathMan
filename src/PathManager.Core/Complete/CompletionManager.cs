@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using PathManager.Core.Catalog;
 using PathManager.Core.Env;
 using PathManager.Core.Exceptions;
 
@@ -8,13 +9,15 @@ namespace PathManager.Core.Complete;
 public class CompletionManager
 {
     private readonly IEnvironmentProvider _env;
+    private readonly ICommandRunner _runner;
     private readonly string _completionsDir;
 
     public string CompletionsDirectory => _completionsDir;
 
-    public CompletionManager(IEnvironmentProvider env)
+    public CompletionManager(IEnvironmentProvider env, ICommandRunner? commandRunner = null)
     {
         _env = env ?? throw new ArgumentNullException(nameof(env));
+        _runner = commandRunner ?? new PowerShellCommandRunner();
         _completionsDir = Path.Combine(_env.GetPmHome(), "completions");
         Directory.CreateDirectory(_completionsDir);
     }
@@ -76,8 +79,14 @@ if (Get-Command Register-ArgumentCompleter -ErrorAction SilentlyContinue) {{
                 }}
             }}
             'completions' {{
-                $compSub = @('install')
-                return $compSub | Where-Object {{ $_ -like ""$wordToComplete*"" }} | ForEach-Object {{
+                if ($elements.Count -le 3) {{
+                    $compSub = @('install', 'register-file', 'register-command', 'from-help')
+                    return $compSub | Where-Object {{ $_ -like ""$wordToComplete*"" }} | ForEach-Object {{
+                        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                    }}
+                }}
+                $compFlags = @('--name', '--force', '--json', '--windows-powershell')
+                return $compFlags | Where-Object {{ $_ -like ""$wordToComplete*"" }} | ForEach-Object {{
                     [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
                 }}
             }}
@@ -137,8 +146,7 @@ if (Get-Command Register-ArgumentCompleter -ErrorAction SilentlyContinue) {{
 
     public void AddCompletionFile(string commandName, string scriptContent)
     {
-        var path = Path.Combine(_completionsDir, commandName + ".ps1");
-        File.WriteAllText(path, scriptContent);
+        RegisterScript(commandName, scriptContent, force: true);
     }
 
     public bool RemoveCompletionFile(string commandName)
@@ -150,5 +158,137 @@ if (Get-Command Register-ArgumentCompleter -ErrorAction SilentlyContinue) {{
             return true;
         }
         return false;
+    }
+
+    public string RegisterFile(string sourcePath, string? commandName = null, bool force = false)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            throw new CompleterFileNotFoundException(sourcePath ?? "");
+        }
+
+        if (!string.Equals(Path.GetExtension(sourcePath), ".ps1", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CompleterUnsupportedFileException(sourcePath);
+        }
+
+        var name = string.IsNullOrWhiteSpace(commandName)
+            ? Path.GetFileNameWithoutExtension(sourcePath)
+            : commandName;
+        var content = File.ReadAllText(sourcePath);
+        return RegisterScript(name, content, force);
+    }
+
+    public string RegisterFromCommand(string commandLine, string? commandName = null, bool force = false)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            throw new CompleterEmptyException("No command was provided to generate a completion script.");
+        }
+
+        var result = _runner.Run(commandLine, TimeSpan.FromSeconds(30));
+        if (result.ExitCode != 0)
+        {
+            throw new CompleterCommandFailedException(commandLine, result.ExitCode, result.StandardError);
+        }
+
+        var name = string.IsNullOrWhiteSpace(commandName) ? InferCommandName(commandLine) : commandName;
+        return RegisterScript(name, result.StandardOutput, force);
+    }
+
+    public string RegisterFromHelp(string commandLine, string? commandName = null, bool force = false)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            throw new CompleterEmptyException("No command was provided to parse --help from.");
+        }
+
+        var name = string.IsNullOrWhiteSpace(commandName) ? InferCommandName(commandLine) : commandName;
+        var helpText = CaptureHelpText(commandLine);
+        var script = HelpCompleterGenerator.Generate(name, helpText);
+        return RegisterScript(name, script, force);
+    }
+
+    public string RegisterScript(string commandName, string scriptContent, bool force = false)
+    {
+        CatalogManager.ValidateCommandName(commandName);
+
+        if (string.IsNullOrWhiteSpace(scriptContent))
+        {
+            throw new CompleterEmptyException($"Completion script for '{commandName}' was empty.");
+        }
+
+        var dest = Path.Combine(_completionsDir, commandName + ".ps1");
+        if (File.Exists(dest) && !force)
+        {
+            throw new CompleterExistsException(commandName, dest);
+        }
+
+        File.WriteAllText(dest, scriptContent);
+        return dest;
+    }
+
+    public static string InferCommandName(string commandLine)
+    {
+        var token = FirstToken(commandLine).Trim().Trim('"').Trim('\'');
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            throw new InvalidCommandNameException(commandLine, "Could not infer a command name. Pass --name.");
+        }
+
+        var file = Path.GetFileName(token);
+        var name = Path.GetFileNameWithoutExtension(file);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = token;
+        }
+
+        CatalogManager.ValidateCommandName(name);
+        return name;
+    }
+
+    private string CaptureHelpText(string commandLine)
+    {
+        var first = _runner.Run(AppendArg(commandLine, "--help"), TimeSpan.FromSeconds(30));
+        var firstText = CombineOutput(first);
+        if (HelpCompleterGenerator.HasSuggestions(firstText))
+        {
+            return firstText;
+        }
+
+        var second = _runner.Run(AppendArg(commandLine, "-h"), TimeSpan.FromSeconds(30));
+        var secondText = CombineOutput(second);
+        if (HelpCompleterGenerator.HasSuggestions(secondText))
+        {
+            return secondText;
+        }
+
+        throw new CompleterEmptyException(
+            $"No flags or subcommands were found in --help/-h output for '{commandLine}'.");
+    }
+
+    private static string CombineOutput(CommandCapture result)
+        => (result.StandardOutput ?? "") + Environment.NewLine + (result.StandardError ?? "");
+
+    private static string AppendArg(string commandLine, string arg)
+        => string.IsNullOrWhiteSpace(commandLine) ? arg : commandLine.TrimEnd() + " " + arg;
+
+    private static string FirstToken(string commandLine)
+    {
+        var text = commandLine.Trim();
+        if (text.Length == 0)
+        {
+            return "";
+        }
+
+        if (text[0] is '"' or '\'')
+        {
+            var quote = text[0];
+            var end = text.IndexOf(quote, 1);
+            return end > 0 ? text[1..end] : text.Trim(quote);
+        }
+
+        var space = text.IndexOf(' ');
+        return space < 0 ? text : text[..space];
     }
 }

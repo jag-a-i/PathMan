@@ -1,0 +1,76 @@
+name: CD
+
+on:
+  push:
+    branches: [master, main]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Pack and publish
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Test
+        run: dotnet test tests/PathManager.Tests/PathManager.Tests.csproj -c Release --nologo
+
+      - name: Publish self-contained win-x64
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/publish | Out-Null
+          $pubArgs = @(
+            '-c', 'Release',
+            '-r', 'win-x64',
+            '--self-contained', 'true',
+            '-p:PublishSingleFile=true',
+            '-p:IncludeNativeLibrariesForSelfExtract=true',
+            '-p:DebugType=None',
+            '-p:DebugSymbols=false',
+            '-o', 'artifacts/publish'
+          )
+          dotnet publish src/PathManager.Cli/PathManager.Cli.csproj @pubArgs
+          dotnet publish src/PathManager.Shim/PathManager.Shim.csproj @pubArgs
+          Copy-Item install.ps1 artifacts/publish/install.ps1 -Force
+
+      - name: Zip
+        run: |
+          if (Test-Path artifacts/pathman-win-x64.zip) { Remove-Item artifacts/pathman-win-x64.zip -Force }
+          Compress-Archive -Path artifacts/publish/* -DestinationPath artifacts/pathman-win-x64.zip
+
+      - name: Publish GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $sha = $env:GITHUB_SHA.Substring(0, 7)
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tag = $env:GITHUB_REF.Substring('refs/tags/'.Length)
+            $title = "PathManager $tag"
+            $notes = "Self-contained win-x64 build from $sha."
+            $pre = @()
+          } else {
+            $tag = 'nightly'
+            $title = "PathManager nightly"
+            $notes = "Latest build from $($env:GITHUB_REF_NAME) ($sha). Prefer a v* tag for a stable install."
+            $pre = @('--prerelease')
+          }
+
+          $files = @('artifacts/pathman-win-x64.zip', 'install.ps1')
+          $view = & gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @files --clobber
+            gh release edit $tag --title $title --notes $notes @pre
+          } else {
+            gh release create $tag @files --title $title --notes $notes @pre
+          }

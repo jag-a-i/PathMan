@@ -84,7 +84,7 @@ public static class Program
                     return HandleUndo(snapshot, isJson, stdout, stderr);
 
                 case "completions":
-                    return HandleCompletions(verbArgs, complete, isJson, stdout, stderr);
+                    return HandleCompletions(verbArgs, complete, catalog, isJson, stdout, stderr);
 
                 case "uninstall":
                     return HandleUninstall(verbArgs, env, pathStore, complete, shim, isJson, stdout);
@@ -162,7 +162,10 @@ public static class Program
         stdout.WriteLine("  doctor [--repair]     Inspect PATH limits, duplicates, dead folders, and catalog health");
         stdout.WriteLine("  path [add|remove]     View or safely edit User PATH without setx");
         stdout.WriteLine("  undo                  Restore previous snapshot of catalog and User PATH");
-        stdout.WriteLine("  completions install   Install PowerShell tab completions hook into $PROFILE");
+        stdout.WriteLine("  completions install              Install the $PROFILE hook (folder loader + pathman Tab)");
+        stdout.WriteLine("  completions register-file        Copy a .ps1 into the completions folder");
+        stdout.WriteLine("  completions register-command     Run a generator command and store its script");
+        stdout.WriteLine("  completions from-help            Best-effort completer from --help / -h");
         stdout.WriteLine("  uninstall             Safely clean up PathManager and restore User PATH");
         stdout.WriteLine();
         stdout.WriteLine("GLOBAL FLAGS:");
@@ -657,12 +660,14 @@ public static class Program
     private static int HandleCompletions(
         string[] args,
         CompletionManager complete,
+        CatalogManager catalog,
         bool isJson,
         TextWriter stdout,
         TextWriter stderr)
     {
-        var nonFlagArgs = args.Where(a => !a.StartsWith("-")).ToArray();
-        var subVerb = nonFlagArgs.Length > 0 ? nonFlagArgs[0].ToLowerInvariant() : "install";
+        SplitCompletionsArgs(args, out var subVerb, out var payload);
+        var force = args.Contains("--force");
+        var nameOpt = GetOptionValue(args, "--name");
 
         if (subVerb == "install")
         {
@@ -683,8 +688,149 @@ public static class Program
             return 0;
         }
 
-        stderr.WriteLine("Usage: pathman completions install [--windows-powershell] [--json]");
+        if (subVerb == "register-file")
+        {
+            if (payload.Count < 1)
+            {
+                stderr.WriteLine("Usage: pathman completions register-file <file.ps1> [--name <command>] [--force] [--json]");
+                return 2;
+            }
+
+            var dest = complete.RegisterFile(payload[0], nameOpt, force);
+            return WriteCompleterRegistered(catalog, dest, "file", isJson, stdout);
+        }
+
+        if (subVerb == "register-command")
+        {
+            if (payload.Count < 1)
+            {
+                stderr.WriteLine("Usage: pathman completions register-command <command...> [--name <command>] [--force] [--json]");
+                return 2;
+            }
+
+            var commandLine = string.Join(" ", payload);
+            var dest = complete.RegisterFromCommand(commandLine, nameOpt, force);
+            return WriteCompleterRegistered(catalog, dest, "command", isJson, stdout);
+        }
+
+        if (subVerb == "from-help")
+        {
+            if (payload.Count < 1)
+            {
+                stderr.WriteLine("Usage: pathman completions from-help <command...> [--name <command>] [--force] [--json]");
+                return 2;
+            }
+
+            var commandLine = string.Join(" ", payload);
+            var dest = complete.RegisterFromHelp(commandLine, nameOpt, force);
+            return WriteCompleterRegistered(catalog, dest, "help", isJson, stdout);
+        }
+
+        stderr.WriteLine("Usage:");
+        stderr.WriteLine("  pathman completions install [--windows-powershell] [--json]");
+        stderr.WriteLine("  pathman completions register-file <file.ps1> [--name <command>] [--force] [--json]");
+        stderr.WriteLine("  pathman completions register-command <command...> [--name <command>] [--force] [--json]");
+        stderr.WriteLine("  pathman completions from-help <command...> [--name <command>] [--force] [--json]");
         return 2;
+    }
+
+    private static int WriteCompleterRegistered(
+        CatalogManager catalog,
+        string dest,
+        string source,
+        bool isJson,
+        TextWriter stdout)
+    {
+        var commandName = Path.GetFileNameWithoutExtension(dest);
+        BindCatalogCompleter(catalog, commandName);
+
+        if (isJson)
+        {
+            stdout.WriteLine(JsonSerializer.Serialize(new { command = commandName, path = dest, source }, JsonOpts));
+        }
+        else
+        {
+            stdout.WriteLine($"Registered completions for {commandName}:");
+            stdout.WriteLine($"  {dest}");
+            stdout.WriteLine();
+            stdout.WriteLine("Load in this session with `. $PROFILE`, or open a new PowerShell window.");
+        }
+
+        return 0;
+    }
+
+    private static void BindCatalogCompleter(CatalogManager catalog, string commandName)
+    {
+        var existing = catalog.GetCommand(commandName);
+        if (existing == null)
+        {
+            return;
+        }
+
+        existing.Completer = $"completions/{commandName}.ps1";
+        catalog.AddOrUpdateCommand(existing);
+    }
+
+    private static string? GetOptionValue(string[] args, string option)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == option)
+            {
+                return args[i + 1];
+            }
+        }
+
+        return null;
+    }
+
+    private static readonly string[] CompletionsSwitchFlags =
+    {
+        "--json", "--force", "--windows-powershell", "--help", "-h"
+    };
+
+    private static readonly string[] CompletionsValueFlags =
+    {
+        "--name"
+    };
+
+    private static void SplitCompletionsArgs(string[] args, out string subVerb, out List<string> payload)
+    {
+        subVerb = "install";
+        payload = new List<string>();
+        var haveVerb = false;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (CompletionsValueFlags.Contains(arg, StringComparer.OrdinalIgnoreCase))
+            {
+                if (i + 1 < args.Length)
+                {
+                    i++;
+                }
+                continue;
+            }
+
+            if (CompletionsSwitchFlags.Contains(arg, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!haveVerb)
+            {
+                if (arg.StartsWith("-"))
+                {
+                    continue;
+                }
+
+                subVerb = arg.ToLowerInvariant();
+                haveVerb = true;
+                continue;
+            }
+
+            payload.Add(arg);
+        }
     }
 
     private static int HandleUninstall(

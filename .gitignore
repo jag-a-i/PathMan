@@ -9,3 +9,5 @@ obj/
 *.lock
 convo.txt
 *.log
+artifacts/
+--nologo/

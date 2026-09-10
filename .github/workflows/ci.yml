@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore tests/PathManager.Tests/PathManager.Tests.csproj
+
+      - name: Build
+        run: dotnet build tests/PathManager.Tests/PathManager.Tests.csproj -c Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/PathManager.Tests/PathManager.Tests.csproj -c Release --no-build --nologo --logger "trx;LogFileName=test-results.trx"
+
+      - name: Publish pathman and shim
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/pathman | Out-Null
+          dotnet publish src/PathManager.Cli/PathManager.Cli.csproj -c Release -o artifacts/pathman
+          dotnet publish src/PathManager.Shim/PathManager.Shim.csproj -c Release -o artifacts/pathman
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/TestResults/*.trx"
+          if-no-files-found: ignore
+
+      - name: Upload compiled pathman
+        uses: actions/upload-artifact@v4
+        with:
+          name: pathman-windows
+          path: artifacts/pathman
